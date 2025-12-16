@@ -23,6 +23,7 @@ const PEN_DATA = {
 }
 
 const STORAGE_KEY = 'glp1-dose-history'
+const SETTINGS_KEY = 'glp1-settings'
 
 // Detection modes
 const DETECTION_MODES = {
@@ -36,13 +37,28 @@ const DETECTION_MODES = {
   }
 }
 
+// Load saved settings from localStorage
+const loadSettings = () => {
+  try {
+    const saved = localStorage.getItem(SETTINGS_KEY)
+    if (saved) {
+      return JSON.parse(saved)
+    }
+  } catch (e) {
+    console.error('Failed to load settings:', e)
+  }
+  return null
+}
+
+const savedSettings = loadSettings()
+
 function App() {
-  // State
-  const [medication, setMedication] = useState('wegovy')
-  const [penIndex, setPenIndex] = useState(0)
-  const [targetDose, setTargetDose] = useState(0.25)
+  // State - initialize from saved settings if available
+  const [medication, setMedication] = useState(savedSettings?.medication || 'wegovy')
+  const [penIndex, setPenIndex] = useState(savedSettings?.penIndex || 0)
+  const [targetDose, setTargetDose] = useState(savedSettings?.targetDose || 0.25)
   const [customDose, setCustomDose] = useState('')
-  const [sensitivity, setSensitivity] = useState(0.15)
+  const [sensitivity, setSensitivity] = useState(savedSettings?.sensitivity || 0.15)
   const [clickCount, setClickCount] = useState(0)
   const [isListening, setIsListening] = useState(false)
   const [error, setError] = useState(null)
@@ -50,7 +66,7 @@ function App() {
   const [history, setHistory] = useState([])
   const [targetReached, setTargetReached] = useState(false)
   const [micPermission, setMicPermission] = useState(null) // null = unknown, 'granted', 'denied', 'prompt'
-  const [detectionMode, setDetectionMode] = useState('advanced') // 'simple' or 'advanced'
+  const [detectionMode, setDetectionMode] = useState(savedSettings?.detectionMode || 'advanced') // 'simple' or 'advanced'
 
   // Refs for audio processing
   const audioContextRef = useRef(null)
@@ -66,6 +82,8 @@ function App() {
   const volumeHistoryRef = useRef([]) // For transient detection
   const peakHoldRef = useRef(0)
   const decayCounterRef = useRef(0)
+  const lowFreqHistoryRef = useRef([]) // Track low frequency (voice) energy
+  const baselineNoiseRef = useRef(0) // Adaptive noise floor
 
   // Derived values
   const currentPen = PEN_DATA[medication].pens[penIndex]
@@ -94,6 +112,18 @@ function App() {
   useEffect(() => {
     setPenIndex(0)
   }, [medication])
+
+  // Save settings to localStorage when they change
+  useEffect(() => {
+    const settings = {
+      medication,
+      penIndex,
+      targetDose,
+      sensitivity,
+      detectionMode
+    }
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings))
+  }, [medication, penIndex, targetDose, sensitivity, detectionMode])
 
   // Check microphone permission status on mount
   useEffect(() => {
@@ -197,7 +227,7 @@ function App() {
     animationFrameRef.current = requestAnimationFrame(processAudioSimple)
   }, [sensitivity])
 
-  // Advanced detection - optimized for pen clicks
+  // Advanced detection - optimized for pen clicks with strong voice rejection
   const processAudioAdvanced = useCallback(() => {
     if (!analyserRef.current) return
 
@@ -208,80 +238,108 @@ function App() {
     const sampleRate = audioContextRef.current?.sampleRate || 44100
     const binSize = sampleRate / (analyserRef.current.fftSize || 512)
 
-    // Focus on high frequencies (2kHz - 10kHz) where pen clicks are prominent
-    // This filters out voice (typically 85-255 Hz) and most ambient noise
-    const lowBin = Math.floor(2000 / binSize)
-    const highBin = Math.min(Math.floor(10000 / binSize), bufferLength - 1)
+    // Voice frequency range (100Hz - 1000Hz) - we want to REJECT these
+    const voiceLowBin = Math.floor(100 / binSize)
+    const voiceHighBin = Math.min(Math.floor(1000 / binSize), bufferLength - 1)
 
-    // Calculate high-frequency energy
-    let highFreqSum = 0
-    let highFreqCount = 0
-    for (let i = lowBin; i <= highBin; i++) {
-      highFreqSum += dataArray[i] * dataArray[i] // Square for RMS
-      highFreqCount++
+    // Click frequency range (3kHz - 8kHz) - mechanical clicks have energy here
+    const clickLowBin = Math.floor(3000 / binSize)
+    const clickHighBin = Math.min(Math.floor(8000 / binSize), bufferLength - 1)
+
+    // Very high frequency range (8kHz - 15kHz) - clicks have sharp transients here too
+    const veryHighLowBin = Math.floor(8000 / binSize)
+    const veryHighHighBin = Math.min(Math.floor(15000 / binSize), bufferLength - 1)
+
+    // Calculate voice frequency energy (what we want to reject)
+    let voiceSum = 0
+    for (let i = voiceLowBin; i <= voiceHighBin; i++) {
+      voiceSum += dataArray[i] * dataArray[i]
     }
-    const highFreqRMS = highFreqCount > 0 ? Math.sqrt(highFreqSum / highFreqCount) / 255 : 0
+    const voiceEnergy = Math.sqrt(voiceSum / (voiceHighBin - voiceLowBin + 1)) / 255
 
-    // Also calculate overall volume for comparison
-    let totalSum = 0
-    for (let i = 0; i < bufferLength; i++) {
-      totalSum += dataArray[i]
+    // Calculate click frequency energy
+    let clickSum = 0
+    for (let i = clickLowBin; i <= clickHighBin; i++) {
+      clickSum += dataArray[i] * dataArray[i]
     }
-    const totalVolume = totalSum / bufferLength / 255
+    const clickEnergy = Math.sqrt(clickSum / (clickHighBin - clickLowBin + 1)) / 255
 
-    // Calculate high-to-total ratio (clicks have higher ratio than voice/music)
-    const highFreqRatio = totalVolume > 0.01 ? highFreqRMS / totalVolume : 0
+    // Calculate very high frequency energy
+    let veryHighSum = 0
+    let veryHighCount = 0
+    for (let i = veryHighLowBin; i <= veryHighHighBin && i < bufferLength; i++) {
+      veryHighSum += dataArray[i] * dataArray[i]
+      veryHighCount++
+    }
+    const veryHighEnergy = veryHighCount > 0 ? Math.sqrt(veryHighSum / veryHighCount) / 255 : 0
 
-    // Maintain a short history for transient detection
+    // Track voice energy history to detect sustained voice
+    const lowFreqHistory = lowFreqHistoryRef.current
+    lowFreqHistory.push(voiceEnergy)
+    if (lowFreqHistory.length > 10) lowFreqHistory.shift()
+    const avgVoiceEnergy = lowFreqHistory.reduce((a, b) => a + b, 0) / lowFreqHistory.length
+
+    // Adaptive baseline noise (slowly adapts to ambient noise)
+    baselineNoiseRef.current = 0.995 * baselineNoiseRef.current + 0.005 * clickEnergy
+
+    // Combined high frequency energy for click detection
+    const highFreqEnergy = (clickEnergy * 0.6 + veryHighEnergy * 0.4)
+
+    // Track high frequency history for transient detection
     const history = volumeHistoryRef.current
-    history.push(highFreqRMS)
-    if (history.length > 5) history.shift()
+    history.push(highFreqEnergy)
+    if (history.length > 4) history.shift()
 
-    // Calculate attack rate (how fast the volume rose)
-    const attackRate = history.length >= 2
-      ? highFreqRMS - Math.min(...history.slice(0, -1))
-      : 0
-
-    // Smoothed previous for this frequency band
+    // Calculate spike (change from smoothed baseline)
     const smoothedPrevious = previousHighFreqVolumeRef.current
+    const spike = highFreqEnergy - smoothedPrevious
 
-    // Calculate spike in high frequencies
-    const spike = highFreqRMS - smoothedPrevious
+    // Calculate attack rate (must be very fast for clicks)
+    const recentMin = history.length >= 2 ? Math.min(...history.slice(0, -1)) : 0
+    const attackRate = highFreqEnergy - recentMin
 
-    // Check for click with multiple criteria
+    // Check for click with strict criteria
     const now = Date.now()
     const timeSinceLastClick = now - lastClickTimeRef.current
 
-    // Adjusted sensitivity for advanced mode (scale differently)
-    const adjustedThreshold = sensitivity * 0.5
+    // Scaled threshold based on sensitivity
+    const threshold = sensitivity * 0.4
 
-    // Click detection criteria:
-    // 1. Sharp spike in high frequencies
-    // 2. Fast attack rate (transient characteristic)
-    // 3. High frequency content ratio is elevated
-    // 4. Minimum time since last click (debounce)
+    // Voice rejection: if voice energy is high relative to click energy, reject
+    const voiceToClickRatio = clickEnergy > 0.001 ? voiceEnergy / clickEnergy : 10
+    const isVoicePresent = voiceToClickRatio > 1.5 || avgVoiceEnergy > 0.15
+
+    // Click must be significantly above the noise floor
+    const aboveNoise = highFreqEnergy > baselineNoiseRef.current + threshold
+
+    // Click detection criteria (stricter):
+    // 1. Sharp spike in high frequencies above threshold
+    // 2. Very fast attack rate (clicks rise in 1-2 frames)
+    // 3. NOT dominated by voice frequencies
+    // 4. Above adaptive noise floor
+    // 5. Minimum time since last click
     const isClick =
-      spike > adjustedThreshold &&
-      attackRate > adjustedThreshold * 0.3 &&
-      highFreqRatio > 0.3 &&
-      timeSinceLastClick > 120 // Slightly faster for pen clicks
+      spike > threshold &&
+      attackRate > threshold * 0.5 &&
+      !isVoicePresent &&
+      aboveNoise &&
+      timeSinceLastClick > 100
 
     if (isClick) {
       setClickCount(prev => prev + 1)
       lastClickTimeRef.current = now
-      // Reset peak hold after detection
-      peakHoldRef.current = highFreqRMS
+      peakHoldRef.current = highFreqEnergy
       decayCounterRef.current = 0
     }
 
-    // Update smoothed previous with faster response for transients
-    previousHighFreqVolumeRef.current = 0.4 * highFreqRMS + 0.6 * smoothedPrevious
+    // Update smoothed previous (fast for transient response)
+    previousHighFreqVolumeRef.current = 0.5 * highFreqEnergy + 0.5 * smoothedPrevious
 
     // Decay peak hold
-    if (decayCounterRef.current < 10) {
+    if (decayCounterRef.current < 8) {
       decayCounterRef.current++
     } else {
-      peakHoldRef.current = Math.max(peakHoldRef.current * 0.95, highFreqRMS)
+      peakHoldRef.current = Math.max(peakHoldRef.current * 0.9, highFreqEnergy)
     }
 
     animationFrameRef.current = requestAnimationFrame(processAudioAdvanced)
@@ -311,6 +369,8 @@ function App() {
     volumeHistoryRef.current = []
     peakHoldRef.current = 0
     decayCounterRef.current = 0
+    lowFreqHistoryRef.current = []
+    baselineNoiseRef.current = 0
 
     // Check for secure context first
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -397,6 +457,12 @@ function App() {
   // Manual click adjustment
   const adjustClicks = (delta) => {
     setClickCount(prev => Math.max(0, prev + delta))
+  }
+
+  // Reset click count (without stopping listening)
+  const resetCount = () => {
+    setClickCount(0)
+    setTargetReached(false)
   }
 
   // Handle quick dose selection
@@ -644,21 +710,29 @@ function App() {
           )}
         </div>
 
-        {/* Manual Adjustment Buttons */}
+        {/* Manual Adjustment and Reset Buttons */}
         {isListening && (
-          <div className="flex gap-2 justify-center">
+          <div className="space-y-2">
+            <div className="flex gap-2 justify-center">
+              <button
+                onClick={() => adjustClicks(-1)}
+                className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl transition-all text-xl"
+              >
+                -
+              </button>
+              <span className="py-3 px-4 text-slate-400">Manual adjust</span>
+              <button
+                onClick={() => adjustClicks(1)}
+                className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl transition-all text-xl"
+              >
+                +
+              </button>
+            </div>
             <button
-              onClick={() => adjustClicks(-1)}
-              className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl transition-all text-xl"
+              onClick={resetCount}
+              className="w-full bg-amber-700 hover:bg-amber-600 text-white font-medium py-2 rounded-xl transition-all text-sm"
             >
-              -
-            </button>
-            <span className="py-3 px-4 text-slate-400">Manual adjust</span>
-            <button
-              onClick={() => adjustClicks(1)}
-              className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl transition-all text-xl"
-            >
-              +
+              Reset Count to 0
             </button>
           </div>
         )}
