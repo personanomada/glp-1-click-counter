@@ -227,120 +227,48 @@ function App() {
     animationFrameRef.current = requestAnimationFrame(processAudioSimple)
   }, [sensitivity])
 
-  // Advanced detection - optimized for pen clicks with strong voice rejection
+  // Advanced detection - focuses on high frequencies, rejects voice
   const processAudioAdvanced = useCallback(() => {
     if (!analyserRef.current) return
 
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
     analyserRef.current.getByteFrequencyData(dataArray)
 
-    const bufferLength = dataArray.length
-    const sampleRate = audioContextRef.current?.sampleRate || 44100
-    const binSize = sampleRate / (analyserRef.current.fftSize || 512)
+    // Focus on upper half of frequency spectrum (higher frequencies where clicks are)
+    const midPoint = Math.floor(dataArray.length / 2)
+    let highSum = 0
+    let lowSum = 0
 
-    // Voice frequency range (100Hz - 1000Hz) - we want to REJECT these
-    const voiceLowBin = Math.floor(100 / binSize)
-    const voiceHighBin = Math.min(Math.floor(1000 / binSize), bufferLength - 1)
-
-    // Click frequency range (3kHz - 8kHz) - mechanical clicks have energy here
-    const clickLowBin = Math.floor(3000 / binSize)
-    const clickHighBin = Math.min(Math.floor(8000 / binSize), bufferLength - 1)
-
-    // Very high frequency range (8kHz - 15kHz) - clicks have sharp transients here too
-    const veryHighLowBin = Math.floor(8000 / binSize)
-    const veryHighHighBin = Math.min(Math.floor(15000 / binSize), bufferLength - 1)
-
-    // Calculate voice frequency energy (what we want to reject)
-    let voiceSum = 0
-    for (let i = voiceLowBin; i <= voiceHighBin; i++) {
-      voiceSum += dataArray[i] * dataArray[i]
+    for (let i = 0; i < midPoint; i++) {
+      lowSum += dataArray[i]
     }
-    const voiceEnergy = Math.sqrt(voiceSum / (voiceHighBin - voiceLowBin + 1)) / 255
-
-    // Calculate click frequency energy
-    let clickSum = 0
-    for (let i = clickLowBin; i <= clickHighBin; i++) {
-      clickSum += dataArray[i] * dataArray[i]
+    for (let i = midPoint; i < dataArray.length; i++) {
+      highSum += dataArray[i]
     }
-    const clickEnergy = Math.sqrt(clickSum / (clickHighBin - clickLowBin + 1)) / 255
 
-    // Calculate very high frequency energy
-    let veryHighSum = 0
-    let veryHighCount = 0
-    for (let i = veryHighLowBin; i <= veryHighHighBin && i < bufferLength; i++) {
-      veryHighSum += dataArray[i] * dataArray[i]
-      veryHighCount++
-    }
-    const veryHighEnergy = veryHighCount > 0 ? Math.sqrt(veryHighSum / veryHighCount) / 255 : 0
+    const highEnergy = highSum / (dataArray.length - midPoint) / 255
+    const lowEnergy = lowSum / midPoint / 255
 
-    // Track voice energy history to detect sustained voice
-    const lowFreqHistory = lowFreqHistoryRef.current
-    lowFreqHistory.push(voiceEnergy)
-    if (lowFreqHistory.length > 10) lowFreqHistory.shift()
-    const avgVoiceEnergy = lowFreqHistory.reduce((a, b) => a + b, 0) / lowFreqHistory.length
-
-    // Adaptive baseline noise (slowly adapts to ambient noise)
-    baselineNoiseRef.current = 0.995 * baselineNoiseRef.current + 0.005 * clickEnergy
-
-    // Combined high frequency energy for click detection
-    const highFreqEnergy = (clickEnergy * 0.6 + veryHighEnergy * 0.4)
-
-    // Track high frequency history for transient detection
-    const history = volumeHistoryRef.current
-    history.push(highFreqEnergy)
-    if (history.length > 4) history.shift()
-
-    // Calculate spike (change from smoothed baseline)
+    // Smoothed previous for high frequencies
     const smoothedPrevious = previousHighFreqVolumeRef.current
-    const spike = highFreqEnergy - smoothedPrevious
 
-    // Calculate attack rate (must be very fast for clicks)
-    const recentMin = history.length >= 2 ? Math.min(...history.slice(0, -1)) : 0
-    const attackRate = highFreqEnergy - recentMin
+    // Calculate spike in high frequencies
+    const spike = highEnergy - smoothedPrevious
 
-    // Check for click with strict criteria
+    // Check for click
     const now = Date.now()
     const timeSinceLastClick = now - lastClickTimeRef.current
 
-    // Scaled threshold based on sensitivity
-    const threshold = sensitivity * 0.4
+    // Voice rejection: if low frequencies are much stronger than high, it's probably voice
+    const isLikelyVoice = lowEnergy > highEnergy * 1.5 && lowEnergy > 0.1
 
-    // Voice rejection: if voice energy is high relative to click energy, reject
-    const voiceToClickRatio = clickEnergy > 0.001 ? voiceEnergy / clickEnergy : 10
-    const isVoicePresent = voiceToClickRatio > 1.5 || avgVoiceEnergy > 0.15
-
-    // Click must be significantly above the noise floor
-    const aboveNoise = highFreqEnergy > baselineNoiseRef.current + threshold
-
-    // Click detection criteria (stricter):
-    // 1. Sharp spike in high frequencies above threshold
-    // 2. Very fast attack rate (clicks rise in 1-2 frames)
-    // 3. NOT dominated by voice frequencies
-    // 4. Above adaptive noise floor
-    // 5. Minimum time since last click
-    const isClick =
-      spike > threshold &&
-      attackRate > threshold * 0.5 &&
-      !isVoicePresent &&
-      aboveNoise &&
-      timeSinceLastClick > 100
-
-    if (isClick) {
+    if (spike > sensitivity && !isLikelyVoice && timeSinceLastClick > 150) {
       setClickCount(prev => prev + 1)
       lastClickTimeRef.current = now
-      peakHoldRef.current = highFreqEnergy
-      decayCounterRef.current = 0
     }
 
-    // Update smoothed previous (fast for transient response)
-    previousHighFreqVolumeRef.current = 0.5 * highFreqEnergy + 0.5 * smoothedPrevious
-
-    // Decay peak hold
-    if (decayCounterRef.current < 8) {
-      decayCounterRef.current++
-    } else {
-      peakHoldRef.current = Math.max(peakHoldRef.current * 0.9, highFreqEnergy)
-    }
+    // Update smoothed previous
+    previousHighFreqVolumeRef.current = 0.3 * highEnergy + 0.7 * smoothedPrevious
 
     animationFrameRef.current = requestAnimationFrame(processAudioAdvanced)
   }, [sensitivity])
