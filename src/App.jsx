@@ -24,6 +24,18 @@ const PEN_DATA = {
 
 const STORAGE_KEY = 'glp1-dose-history'
 
+// Detection modes
+const DETECTION_MODES = {
+  simple: {
+    name: 'Simple',
+    description: 'Basic volume spike detection - works for any loud click sound'
+  },
+  advanced: {
+    name: 'Advanced',
+    description: 'Optimized for pen clicks - filters voice/ambient noise, detects sharp transients'
+  }
+}
+
 function App() {
   // State
   const [medication, setMedication] = useState('wegovy')
@@ -38,6 +50,7 @@ function App() {
   const [history, setHistory] = useState([])
   const [targetReached, setTargetReached] = useState(false)
   const [micPermission, setMicPermission] = useState(null) // null = unknown, 'granted', 'denied', 'prompt'
+  const [detectionMode, setDetectionMode] = useState('advanced') // 'simple' or 'advanced'
 
   // Refs for audio processing
   const audioContextRef = useRef(null)
@@ -46,6 +59,13 @@ function App() {
   const animationFrameRef = useRef(null)
   const previousVolumeRef = useRef(0)
   const lastClickTimeRef = useRef(0)
+
+  // Additional refs for advanced detection
+  const highPassFilterRef = useRef(null)
+  const previousHighFreqVolumeRef = useRef(0)
+  const volumeHistoryRef = useRef([]) // For transient detection
+  const peakHoldRef = useRef(0)
+  const decayCounterRef = useRef(0)
 
   // Derived values
   const currentPen = PEN_DATA[medication].pens[penIndex]
@@ -142,8 +162,8 @@ function App() {
     }
   }
 
-  // Audio processing loop
-  const processAudio = useCallback(() => {
+  // Simple detection - original algorithm
+  const processAudioSimple = useCallback(() => {
     if (!analyserRef.current) return
 
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
@@ -174,16 +194,123 @@ function App() {
     // Update smoothed previous (0.3 current + 0.7 previous)
     previousVolumeRef.current = 0.3 * currentVolume + 0.7 * smoothedPrevious
 
-    animationFrameRef.current = requestAnimationFrame(processAudio)
+    animationFrameRef.current = requestAnimationFrame(processAudioSimple)
   }, [sensitivity])
+
+  // Advanced detection - optimized for pen clicks
+  const processAudioAdvanced = useCallback(() => {
+    if (!analyserRef.current) return
+
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
+    analyserRef.current.getByteFrequencyData(dataArray)
+
+    const bufferLength = dataArray.length
+    const sampleRate = audioContextRef.current?.sampleRate || 44100
+    const binSize = sampleRate / (analyserRef.current.fftSize || 512)
+
+    // Focus on high frequencies (2kHz - 10kHz) where pen clicks are prominent
+    // This filters out voice (typically 85-255 Hz) and most ambient noise
+    const lowBin = Math.floor(2000 / binSize)
+    const highBin = Math.min(Math.floor(10000 / binSize), bufferLength - 1)
+
+    // Calculate high-frequency energy
+    let highFreqSum = 0
+    let highFreqCount = 0
+    for (let i = lowBin; i <= highBin; i++) {
+      highFreqSum += dataArray[i] * dataArray[i] // Square for RMS
+      highFreqCount++
+    }
+    const highFreqRMS = highFreqCount > 0 ? Math.sqrt(highFreqSum / highFreqCount) / 255 : 0
+
+    // Also calculate overall volume for comparison
+    let totalSum = 0
+    for (let i = 0; i < bufferLength; i++) {
+      totalSum += dataArray[i]
+    }
+    const totalVolume = totalSum / bufferLength / 255
+
+    // Calculate high-to-total ratio (clicks have higher ratio than voice/music)
+    const highFreqRatio = totalVolume > 0.01 ? highFreqRMS / totalVolume : 0
+
+    // Maintain a short history for transient detection
+    const history = volumeHistoryRef.current
+    history.push(highFreqRMS)
+    if (history.length > 5) history.shift()
+
+    // Calculate attack rate (how fast the volume rose)
+    const attackRate = history.length >= 2
+      ? highFreqRMS - Math.min(...history.slice(0, -1))
+      : 0
+
+    // Smoothed previous for this frequency band
+    const smoothedPrevious = previousHighFreqVolumeRef.current
+
+    // Calculate spike in high frequencies
+    const spike = highFreqRMS - smoothedPrevious
+
+    // Check for click with multiple criteria
+    const now = Date.now()
+    const timeSinceLastClick = now - lastClickTimeRef.current
+
+    // Adjusted sensitivity for advanced mode (scale differently)
+    const adjustedThreshold = sensitivity * 0.5
+
+    // Click detection criteria:
+    // 1. Sharp spike in high frequencies
+    // 2. Fast attack rate (transient characteristic)
+    // 3. High frequency content ratio is elevated
+    // 4. Minimum time since last click (debounce)
+    const isClick =
+      spike > adjustedThreshold &&
+      attackRate > adjustedThreshold * 0.3 &&
+      highFreqRatio > 0.3 &&
+      timeSinceLastClick > 120 // Slightly faster for pen clicks
+
+    if (isClick) {
+      setClickCount(prev => prev + 1)
+      lastClickTimeRef.current = now
+      // Reset peak hold after detection
+      peakHoldRef.current = highFreqRMS
+      decayCounterRef.current = 0
+    }
+
+    // Update smoothed previous with faster response for transients
+    previousHighFreqVolumeRef.current = 0.4 * highFreqRMS + 0.6 * smoothedPrevious
+
+    // Decay peak hold
+    if (decayCounterRef.current < 10) {
+      decayCounterRef.current++
+    } else {
+      peakHoldRef.current = Math.max(peakHoldRef.current * 0.95, highFreqRMS)
+    }
+
+    animationFrameRef.current = requestAnimationFrame(processAudioAdvanced)
+  }, [sensitivity])
+
+  // Main audio processing dispatcher
+  const processAudio = useCallback(() => {
+    if (detectionMode === 'advanced') {
+      processAudioAdvanced()
+    } else {
+      processAudioSimple()
+    }
+  }, [detectionMode, processAudioSimple, processAudioAdvanced])
 
   // Start listening
   const startListening = async () => {
     setError(null)
     setClickCount(0)
     setTargetReached(false)
+
+    // Reset simple detection refs
     previousVolumeRef.current = 0
     lastClickTimeRef.current = 0
+
+    // Reset advanced detection refs
+    previousHighFreqVolumeRef.current = 0
+    volumeHistoryRef.current = []
+    peakHoldRef.current = 0
+    decayCounterRef.current = 0
 
     // Check for secure context first
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -204,13 +331,22 @@ function App() {
 
       const source = audioContext.createMediaStreamSource(stream)
       const analyser = audioContext.createAnalyser()
-      analyser.fftSize = 256
-      analyser.smoothingTimeConstant = 0.3
+
+      // Use larger FFT for better frequency resolution in advanced mode
+      analyser.fftSize = detectionMode === 'advanced' ? 512 : 256
+      analyser.smoothingTimeConstant = detectionMode === 'advanced' ? 0.1 : 0.3
+
       source.connect(analyser)
       analyserRef.current = analyser
 
       setIsListening(true)
-      animationFrameRef.current = requestAnimationFrame(processAudio)
+
+      // Start the appropriate processing loop directly
+      if (detectionMode === 'advanced') {
+        animationFrameRef.current = requestAnimationFrame(processAudioAdvanced)
+      } else {
+        animationFrameRef.current = requestAnimationFrame(processAudioSimple)
+      }
     } catch (err) {
       console.error('Microphone error:', err)
       setError('Microphone access denied. Please allow microphone access to use click detection.')
@@ -375,6 +511,30 @@ function App() {
           </div>
           <p className="text-slate-500 text-xs mt-2">
             Target: {targetClicks} clicks for {targetDose.toFixed(2)} mg
+          </p>
+        </div>
+
+        {/* Detection Mode Selection */}
+        <div className="bg-slate-800 rounded-xl p-4">
+          <label className="text-slate-400 text-sm block mb-2">Detection Mode</label>
+          <div className="grid grid-cols-2 gap-2">
+            {Object.entries(DETECTION_MODES).map(([key, mode]) => (
+              <button
+                key={key}
+                onClick={() => setDetectionMode(key)}
+                disabled={isListening}
+                className={`py-3 px-2 rounded-lg text-sm font-medium transition-all ${
+                  detectionMode === key
+                    ? 'bg-amber-600 text-white'
+                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                } ${isListening ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {mode.name}
+              </button>
+            ))}
+          </div>
+          <p className="text-slate-500 text-xs mt-2">
+            {DETECTION_MODES[detectionMode].description}
           </p>
         </div>
 
