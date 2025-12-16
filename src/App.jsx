@@ -81,12 +81,17 @@ function App() {
   const [targetReached, setTargetReached] = useState(false)
   const [micPermission, setMicPermission] = useState(null) // null = unknown, 'granted', 'denied', 'prompt'
   const [detectionMode, setDetectionMode] = useState(savedSettings?.detectionMode || 'simple') // 'simple' or 'advanced'
+  const [showInstructions, setShowInstructions] = useState(!savedSettings) // Show on first visit
 
   // Calibration state
   const [isCalibrating, setIsCalibrating] = useState(false)
   const [calibrationClicks, setCalibrationClicks] = useState([])
   const [clickSignature, setClickSignature] = useState(loadSignature)
   const calibrationSamplesRef = useRef([])
+
+  // Animation state
+  const [clickAnimation, setClickAnimation] = useState(false)
+  const prevClickCount = useRef(0)
 
   // Refs for audio processing
   const audioContextRef = useRef(null)
@@ -123,9 +128,16 @@ function App() {
     }
   }, [])
 
-  // Check if target reached
+  // Check if target reached and trigger animations
   useEffect(() => {
     setTargetReached(clickCount >= targetClicks && targetClicks > 0)
+
+    // Trigger click animation when count increases
+    if (clickCount > prevClickCount.current) {
+      setClickAnimation(true)
+      setTimeout(() => setClickAnimation(false), 200)
+    }
+    prevClickCount.current = clickCount
   }, [clickCount, targetClicks])
 
   // Reset pen index when medication changes
@@ -617,26 +629,87 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white p-4">
+    <div className="min-h-screen bg-slate-900 text-white p-4 safe-area-bottom">
       <div className="max-w-md mx-auto space-y-4">
+        {/* Instructions Modal */}
+        {showInstructions && (
+          <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50 animate-fade-in-up">
+            <div className="bg-slate-800 rounded-2xl p-6 max-w-sm w-full space-y-4 max-h-[90vh] overflow-y-auto">
+              <h2 className="text-2xl font-bold text-cyan-400 text-center">Welcome!</h2>
+
+              <div className="space-y-4 text-slate-300 text-sm">
+                <div className="bg-slate-700/50 rounded-xl p-4">
+                  <h3 className="font-semibold text-white mb-2 flex items-center gap-2">
+                    <span className="w-6 h-6 bg-cyan-600 rounded-full flex items-center justify-center text-xs">1</span>
+                    Setup
+                  </h3>
+                  <p>Select your medication, pen strength, and target dose. Your settings are saved automatically.</p>
+                </div>
+
+                <div className="bg-slate-700/50 rounded-xl p-4">
+                  <h3 className="font-semibold text-white mb-2 flex items-center gap-2">
+                    <span className="w-6 h-6 bg-cyan-600 rounded-full flex items-center justify-center text-xs">2</span>
+                    Start Counting
+                  </h3>
+                  <p>Tap "Start Listening" and hold your pen near your phone's microphone. Each click will be counted automatically.</p>
+                </div>
+
+                <div className="bg-slate-700/50 rounded-xl p-4">
+                  <h3 className="font-semibold text-white mb-2 flex items-center gap-2">
+                    <span className="w-6 h-6 bg-cyan-600 rounded-full flex items-center justify-center text-xs">3</span>
+                    Better Accuracy
+                  </h3>
+                  <p>For best results, use <strong>Advanced mode</strong> and calibrate with your actual pen clicks. This creates a unique sound signature for your device.</p>
+                </div>
+
+                <div className="bg-slate-700/50 rounded-xl p-4">
+                  <h3 className="font-semibold text-white mb-2 flex items-center gap-2">
+                    <span className="w-6 h-6 bg-cyan-600 rounded-full flex items-center justify-center text-xs">4</span>
+                    Tips
+                  </h3>
+                  <ul className="list-disc list-inside space-y-1 text-slate-400">
+                    <li>Use in a quiet environment</li>
+                    <li>Hold pen 2-4 inches from mic</li>
+                    <li>Use +/- buttons to adjust if needed</li>
+                    <li>Save doses to track your history</li>
+                  </ul>
+                </div>
+              </div>
+
+              <button
+                onClick={() => setShowInstructions(false)}
+                className="w-full bg-cyan-600 hover:bg-cyan-500 active:scale-[0.98] text-white font-semibold py-4 rounded-xl transition-all"
+              >
+                Get Started
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
         <header className="text-center py-4">
           <h1 className="text-2xl font-bold text-cyan-400">GLP-1 Click Counter</h1>
           <p className="text-slate-400 text-sm">Track your injection pen clicks</p>
+          <button
+            onClick={() => setShowInstructions(true)}
+            className="mt-2 text-slate-500 text-xs underline hover:text-slate-400 transition-colors"
+          >
+            How to use
+          </button>
         </header>
 
         {/* Medication Selection */}
         <div className="bg-slate-800 rounded-xl p-4">
           <label className="text-slate-400 text-sm block mb-2">Medication</label>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-2 gap-3">
             {Object.entries(PEN_DATA).map(([key, data]) => (
               <button
                 key={key}
                 onClick={() => setMedication(key)}
                 disabled={isListening}
-                className={`py-3 rounded-lg font-medium transition-all ${
+                className={`py-4 rounded-xl font-medium transition-all duration-200 active:scale-[0.97] ${
                   medication === key
-                    ? 'bg-cyan-600 text-white'
+                    ? 'bg-cyan-600 text-white shadow-lg shadow-cyan-600/30'
                     : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                 } ${isListening ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
@@ -655,9 +728,9 @@ function App() {
                 key={idx}
                 onClick={() => setPenIndex(idx)}
                 disabled={isListening}
-                className={`py-3 px-2 rounded-lg text-sm font-medium transition-all ${
+                className={`py-3 px-2 rounded-xl text-sm font-medium transition-all duration-200 active:scale-[0.97] ${
                   penIndex === idx
-                    ? 'bg-purple-600 text-white'
+                    ? 'bg-purple-600 text-white shadow-lg shadow-purple-600/30'
                     : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
                 } ${isListening ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
@@ -711,21 +784,35 @@ function App() {
 
         {/* Calibration Modal */}
         {isCalibrating && (
-          <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-            <div className="bg-slate-800 rounded-xl p-6 max-w-sm w-full space-y-4">
-              <h2 className="text-xl font-bold text-cyan-400 text-center">Calibrate Your Pen</h2>
-              <p className="text-slate-300 text-sm text-center">
-                Click your pen 5 times. Hold the pen close to your device's microphone.
-              </p>
+          <div className="fixed inset-0 bg-black/90 flex items-center justify-center p-4 z-50 animate-fade-in-up">
+            <div className="bg-slate-800 rounded-2xl p-6 max-w-sm w-full space-y-5">
+              <div className="text-center">
+                <h2 className="text-xl font-bold text-cyan-400">Calibrate Your Pen</h2>
+                <p className="text-slate-400 text-sm mt-1">
+                  Hold pen close to microphone and click 5 times
+                </p>
+              </div>
+
+              {/* Listening indicator */}
+              <div className="flex justify-center">
+                <div className="relative">
+                  <div className="w-20 h-20 rounded-full bg-slate-700 flex items-center justify-center">
+                    <svg className="w-10 h-10 text-cyan-400" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
+                    </svg>
+                  </div>
+                  <div className="absolute inset-0 rounded-full animate-pulse-ring bg-cyan-500/30"></div>
+                </div>
+              </div>
 
               {/* Click indicators */}
-              <div className="flex justify-center gap-2">
+              <div className="flex justify-center gap-3">
                 {[0, 1, 2, 3, 4].map(i => (
                   <div
                     key={i}
-                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-all ${
+                    className={`w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold transition-all duration-300 ${
                       i < calibrationClicks.length
-                        ? 'bg-emerald-500 text-white'
+                        ? 'bg-emerald-500 text-white scale-110 animate-bounce-in'
                         : 'bg-slate-700 text-slate-500'
                     }`}
                   >
@@ -734,27 +821,27 @@ function App() {
                 ))}
               </div>
 
-              <p className="text-slate-400 text-center text-lg">
-                {calibrationClicks.length} / 5 clicks recorded
+              <p className="text-slate-300 text-center text-2xl font-bold">
+                {calibrationClicks.length} <span className="text-slate-500 text-lg font-normal">/ 5</span>
               </p>
 
-              <div className="flex gap-2">
+              <div className="flex gap-3">
                 <button
                   onClick={cancelCalibration}
-                  className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-lg"
+                  className="flex-1 bg-slate-700 hover:bg-slate-600 active:scale-[0.98] text-white py-4 rounded-xl transition-all duration-200"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={finishCalibration}
                   disabled={calibrationClicks.length < 3}
-                  className={`flex-1 py-3 rounded-lg font-medium ${
+                  className={`flex-1 py-4 rounded-xl font-medium transition-all duration-200 ${
                     calibrationClicks.length >= 3
-                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      ? 'bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white shadow-lg shadow-emerald-600/30'
                       : 'bg-slate-700 text-slate-500 cursor-not-allowed'
                   }`}
                 >
-                  Save ({calibrationClicks.length >= 3 ? 'Ready' : 'Need 3+'})
+                  {calibrationClicks.length >= 3 ? 'Save Signature' : `Need ${3 - calibrationClicks.length} more`}
                 </button>
               </div>
             </div>
@@ -845,29 +932,49 @@ function App() {
         </div>
 
         {/* Main Counter Display */}
-        <div className={`rounded-xl p-6 text-center transition-all ${
-          targetReached ? 'bg-emerald-900' : 'bg-slate-800'
-        }`}>
+        <div className={`rounded-2xl p-6 text-center transition-all duration-300 relative overflow-hidden ${
+          targetReached ? 'bg-emerald-900 animate-success-glow' : 'bg-slate-800'
+        } ${isListening ? 'animate-listening-pulse' : ''}`}>
+          {/* Listening indicator */}
+          {isListening && (
+            <div className="absolute top-3 right-3 flex items-center gap-2">
+              <span className="relative flex h-3 w-3">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+              </span>
+              <span className="text-red-400 text-xs font-medium">LIVE</span>
+            </div>
+          )}
+
           {targetReached && (
-            <div className="text-emerald-400 text-lg font-medium mb-2">
+            <div className="text-emerald-400 text-lg font-medium mb-2 animate-bounce-in">
               <span className="mr-2">&#x2713;</span>
               Target dose reached!
             </div>
           )}
-          <div className="text-6xl font-bold text-white mb-2">{clickCount}</div>
-          <div className="text-slate-400 text-lg mb-4">
+
+          <div className={`text-7xl font-bold text-white mb-2 tabular-nums transition-transform ${
+            clickAnimation ? 'animate-count-up' : ''
+          }`}>
+            {clickCount}
+          </div>
+
+          <div className="text-slate-400 text-xl mb-4 font-medium">
             {currentDose.toFixed(2)} mg
           </div>
-          <div className="w-full bg-slate-700 rounded-full h-3 mb-2">
+
+          {/* Progress bar */}
+          <div className="w-full bg-slate-700 rounded-full h-4 mb-3 overflow-hidden">
             <div
-              className={`h-3 rounded-full transition-all ${
-                targetReached ? 'bg-emerald-500' : 'bg-cyan-500'
+              className={`h-4 rounded-full transition-all duration-300 ease-out ${
+                targetReached ? 'bg-emerald-500' : 'bg-gradient-to-r from-cyan-500 to-cyan-400'
               }`}
               style={{ width: `${progress}%` }}
             />
           </div>
-          <div className="text-slate-500 text-sm">
-            {clickCount} / {targetClicks} clicks to target
+
+          <div className="text-slate-400 text-sm">
+            <span className="font-semibold text-white">{clickCount}</span> / {targetClicks} clicks to target
           </div>
         </div>
 
@@ -901,13 +1008,13 @@ function App() {
         )}
 
         {/* Control Buttons */}
-        <div className="flex gap-2">
+        <div className="flex gap-3">
           {!isListening ? (
             <button
               onClick={startListening}
-              className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white font-medium py-4 rounded-xl transition-all flex items-center justify-center gap-2"
+              className="flex-1 bg-cyan-600 hover:bg-cyan-500 active:scale-[0.98] text-white font-semibold py-5 rounded-2xl transition-all duration-200 flex items-center justify-center gap-2 shadow-lg shadow-cyan-600/30"
             >
-              <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+              <svg className="w-6 h-6" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
               </svg>
               Start Listening
@@ -916,13 +1023,13 @@ function App() {
             <>
               <button
                 onClick={stopListening}
-                className="flex-1 bg-red-600 hover:bg-red-500 text-white font-medium py-4 rounded-xl transition-all"
+                className="flex-1 bg-red-600 hover:bg-red-500 active:scale-[0.98] text-white font-semibold py-5 rounded-2xl transition-all duration-200 shadow-lg shadow-red-600/30"
               >
                 Stop
               </button>
               <button
                 onClick={saveDose}
-                className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-white font-medium py-4 rounded-xl transition-all"
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white font-semibold py-5 rounded-2xl transition-all duration-200 shadow-lg shadow-emerald-600/30"
               >
                 Save Dose
               </button>
@@ -932,25 +1039,25 @@ function App() {
 
         {/* Manual Adjustment and Reset Buttons */}
         {isListening && (
-          <div className="space-y-2">
-            <div className="flex gap-2 justify-center">
+          <div className="space-y-3 animate-fade-in-up">
+            <div className="flex gap-4 justify-center items-center">
               <button
                 onClick={() => adjustClicks(-1)}
-                className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl transition-all text-xl"
+                className="w-16 h-16 bg-slate-700 hover:bg-slate-600 active:scale-[0.95] text-white font-bold rounded-2xl transition-all duration-200 text-2xl flex items-center justify-center shadow-lg"
               >
                 -
               </button>
-              <span className="py-3 px-4 text-slate-400">Manual adjust</span>
+              <span className="text-slate-400 text-sm w-24 text-center">Manual adjust</span>
               <button
                 onClick={() => adjustClicks(1)}
-                className="bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 px-6 rounded-xl transition-all text-xl"
+                className="w-16 h-16 bg-slate-700 hover:bg-slate-600 active:scale-[0.95] text-white font-bold rounded-2xl transition-all duration-200 text-2xl flex items-center justify-center shadow-lg"
               >
                 +
               </button>
             </div>
             <button
               onClick={resetCount}
-              className="w-full bg-amber-700 hover:bg-amber-600 text-white font-medium py-2 rounded-xl transition-all text-sm"
+              className="w-full bg-amber-700/80 hover:bg-amber-600 active:scale-[0.98] text-white font-medium py-3 rounded-xl transition-all duration-200 text-sm"
             >
               Reset Count to 0
             </button>
@@ -960,50 +1067,73 @@ function App() {
         {/* History Toggle */}
         <button
           onClick={() => setShowHistory(!showHistory)}
-          className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-3 rounded-xl transition-all"
+          className="w-full bg-slate-800 hover:bg-slate-700 active:scale-[0.99] text-slate-300 font-medium py-4 rounded-xl transition-all duration-200 flex items-center justify-center gap-2"
         >
-          {showHistory ? 'Hide' : 'Show'} Dose History ({history.length})
+          <svg className={`w-4 h-4 transition-transform duration-200 ${showHistory ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+          {showHistory ? 'Hide' : 'Show'} Dose History
+          {history.length > 0 && (
+            <span className="bg-slate-700 text-slate-400 text-xs px-2 py-0.5 rounded-full">{history.length}</span>
+          )}
         </button>
 
         {/* History List */}
         {showHistory && (
-          <div className="bg-slate-800 rounded-xl p-4 space-y-3">
+          <div className="bg-slate-800 rounded-xl p-4 space-y-3 animate-fade-in-up">
             {history.length > 0 ? (
               <>
-                <div className="max-h-64 overflow-y-auto space-y-2">
-                  {history.map(entry => (
-                    <div key={entry.id} className="bg-slate-700 rounded-lg p-3">
+                <div className="max-h-72 overflow-y-auto space-y-2 pr-1">
+                  {history.map((entry, index) => (
+                    <div
+                      key={entry.id}
+                      className="bg-slate-700/70 rounded-xl p-4 transition-all hover:bg-slate-700"
+                      style={{ animationDelay: `${index * 50}ms` }}
+                    >
                       <div className="flex justify-between items-start">
                         <div>
                           <div className="text-white font-medium">{entry.medication}</div>
                           <div className="text-slate-400 text-sm">{entry.penStrength}</div>
                         </div>
                         <div className="text-right">
-                          <div className="text-cyan-400 font-medium">{entry.dose.toFixed(2)} mg</div>
+                          <div className="text-cyan-400 font-semibold text-lg">{entry.dose.toFixed(2)} mg</div>
                           <div className="text-slate-500 text-xs">{entry.clicks} clicks</div>
                         </div>
                       </div>
-                      <div className="text-slate-500 text-xs mt-1">{formatDate(entry.date)}</div>
+                      <div className="text-slate-500 text-xs mt-2 flex items-center gap-1">
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        {formatDate(entry.date)}
+                      </div>
                     </div>
                   ))}
                 </div>
                 <button
                   onClick={clearHistory}
-                  className="w-full bg-red-900/50 hover:bg-red-900 text-red-300 text-sm py-2 rounded-lg transition-all"
+                  className="w-full bg-red-900/30 hover:bg-red-900/50 active:scale-[0.98] text-red-400 text-sm py-3 rounded-xl transition-all duration-200"
                 >
-                  Clear History
+                  Clear All History
                 </button>
               </>
             ) : (
-              <p className="text-slate-500 text-center text-sm">No doses recorded yet</p>
+              <div className="text-center py-8">
+                <svg className="w-12 h-12 text-slate-600 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                </svg>
+                <p className="text-slate-500 text-sm">No doses recorded yet</p>
+                <p className="text-slate-600 text-xs mt-1">Your saved doses will appear here</p>
+              </div>
             )}
           </div>
         )}
 
         {/* Disclaimer */}
-        <p className="text-slate-500 text-xs text-center px-4 pb-4">
-          This tool is for informational purposes only. Click-counting is not officially recommended by manufacturers. Always follow your healthcare provider's instructions.
-        </p>
+        <div className="text-center pb-6 pt-2">
+          <p className="text-slate-500 text-xs px-4 leading-relaxed">
+            This tool is for informational purposes only. Click-counting is not officially recommended by manufacturers. Always follow your healthcare provider's instructions.
+          </p>
+        </div>
       </div>
     </div>
   )
