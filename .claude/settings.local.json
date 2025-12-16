@@ -9,7 +9,10 @@
       "Bash(nvm install:*)",
       "Bash(nvm use:*)",
       "Bash(npm run dev:*)",
-      "Bash(openssl req:*)"
+      "Bash(openssl req:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push)"
     ],
     "deny": [],
     "ask": []

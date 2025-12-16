@@ -24,6 +24,7 @@ const PEN_DATA = {
 
 const STORAGE_KEY = 'glp1-dose-history'
 const SETTINGS_KEY = 'glp1-settings'
+const SIGNATURE_KEY = 'glp1-click-signature'
 
 // Detection modes
 const DETECTION_MODES = {
@@ -33,8 +34,21 @@ const DETECTION_MODES = {
   },
   advanced: {
     name: 'Advanced',
-    description: 'Optimized for pen clicks - filters voice/ambient noise, detects sharp transients'
+    description: 'Uses your calibrated pen click signature for accurate detection'
   }
+}
+
+// Load click signature from localStorage
+const loadSignature = () => {
+  try {
+    const saved = localStorage.getItem(SIGNATURE_KEY)
+    if (saved) {
+      return JSON.parse(saved)
+    }
+  } catch (e) {
+    console.error('Failed to load signature:', e)
+  }
+  return null
 }
 
 // Load saved settings from localStorage
@@ -66,7 +80,13 @@ function App() {
   const [history, setHistory] = useState([])
   const [targetReached, setTargetReached] = useState(false)
   const [micPermission, setMicPermission] = useState(null) // null = unknown, 'granted', 'denied', 'prompt'
-  const [detectionMode, setDetectionMode] = useState(savedSettings?.detectionMode || 'advanced') // 'simple' or 'advanced'
+  const [detectionMode, setDetectionMode] = useState(savedSettings?.detectionMode || 'simple') // 'simple' or 'advanced'
+
+  // Calibration state
+  const [isCalibrating, setIsCalibrating] = useState(false)
+  const [calibrationClicks, setCalibrationClicks] = useState([])
+  const [clickSignature, setClickSignature] = useState(loadSignature)
+  const calibrationSamplesRef = useRef([])
 
   // Refs for audio processing
   const audioContextRef = useRef(null)
@@ -227,51 +247,134 @@ function App() {
     animationFrameRef.current = requestAnimationFrame(processAudioSimple)
   }, [sensitivity])
 
-  // Advanced detection - focuses on high frequencies, rejects voice
+  // Get frequency profile from current audio data
+  const getFrequencyProfile = useCallback((dataArray) => {
+    // Divide spectrum into 8 bands for signature matching
+    const bandCount = 8
+    const bandSize = Math.floor(dataArray.length / bandCount)
+    const bands = []
+
+    for (let b = 0; b < bandCount; b++) {
+      let sum = 0
+      for (let i = b * bandSize; i < (b + 1) * bandSize; i++) {
+        sum += dataArray[i]
+      }
+      bands.push(sum / bandSize / 255)
+    }
+
+    return bands
+  }, [])
+
+  // Calculate similarity between two frequency profiles (0-1, higher is more similar)
+  const calculateSimilarity = useCallback((profile1, profile2) => {
+    if (!profile1 || !profile2 || profile1.length !== profile2.length) return 0
+
+    let dotProduct = 0
+    let norm1 = 0
+    let norm2 = 0
+
+    for (let i = 0; i < profile1.length; i++) {
+      dotProduct += profile1[i] * profile2[i]
+      norm1 += profile1[i] * profile1[i]
+      norm2 += profile2[i] * profile2[i]
+    }
+
+    if (norm1 === 0 || norm2 === 0) return 0
+    return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2))
+  }, [])
+
+  // Calibration audio processing
+  const processCalibration = useCallback(() => {
+    if (!analyserRef.current) return
+
+    const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
+    analyserRef.current.getByteFrequencyData(dataArray)
+
+    // Calculate overall energy
+    let sum = 0
+    for (let i = 0; i < dataArray.length; i++) {
+      sum += dataArray[i]
+    }
+    const energy = sum / dataArray.length / 255
+
+    const smoothedPrevious = previousVolumeRef.current
+    const spike = energy - smoothedPrevious
+
+    const now = Date.now()
+    const timeSinceLastClick = now - lastClickTimeRef.current
+
+    // Detect a spike during calibration
+    if (spike > 0.08 && timeSinceLastClick > 200) {
+      const profile = getFrequencyProfile(dataArray)
+      calibrationSamplesRef.current.push({
+        profile,
+        energy,
+        timestamp: now
+      })
+      setCalibrationClicks(prev => [...prev, { time: now, energy }])
+      lastClickTimeRef.current = now
+    }
+
+    previousVolumeRef.current = 0.3 * energy + 0.7 * smoothedPrevious
+    animationFrameRef.current = requestAnimationFrame(processCalibration)
+  }, [getFrequencyProfile])
+
+  // Advanced detection - uses calibrated signature
   const processAudioAdvanced = useCallback(() => {
     if (!analyserRef.current) return
 
     const dataArray = new Uint8Array(analyserRef.current.frequencyBinCount)
     analyserRef.current.getByteFrequencyData(dataArray)
 
-    // Focus on upper half of frequency spectrum (higher frequencies where clicks are)
-    const midPoint = Math.floor(dataArray.length / 2)
-    let highSum = 0
-    let lowSum = 0
-
-    for (let i = 0; i < midPoint; i++) {
-      lowSum += dataArray[i]
+    // Calculate overall energy
+    let sum = 0
+    for (let i = 0; i < dataArray.length; i++) {
+      sum += dataArray[i]
     }
-    for (let i = midPoint; i < dataArray.length; i++) {
-      highSum += dataArray[i]
-    }
+    const energy = sum / dataArray.length / 255
 
-    const highEnergy = highSum / (dataArray.length - midPoint) / 255
-    const lowEnergy = lowSum / midPoint / 255
-
-    // Smoothed previous for high frequencies
     const smoothedPrevious = previousHighFreqVolumeRef.current
+    const spike = energy - smoothedPrevious
 
-    // Calculate spike in high frequencies
-    const spike = highEnergy - smoothedPrevious
-
-    // Check for click
     const now = Date.now()
     const timeSinceLastClick = now - lastClickTimeRef.current
 
-    // Voice rejection: if low frequencies are much stronger than high, it's probably voice
-    const isLikelyVoice = lowEnergy > highEnergy * 1.5 && lowEnergy > 0.1
+    // If we have a signature, use it for matching
+    if (clickSignature && spike > sensitivity * 0.5) {
+      const currentProfile = getFrequencyProfile(dataArray)
+      const similarity = calculateSimilarity(currentProfile, clickSignature.profile)
 
-    if (spike > sensitivity && !isLikelyVoice && timeSinceLastClick > 150) {
-      setClickCount(prev => prev + 1)
-      lastClickTimeRef.current = now
+      // High similarity to signature = likely a pen click
+      if (similarity > 0.85 && spike > sensitivity * 0.3 && timeSinceLastClick > 150) {
+        setClickCount(prev => prev + 1)
+        lastClickTimeRef.current = now
+      }
+    } else {
+      // Fallback to basic high-frequency detection if no signature
+      const midPoint = Math.floor(dataArray.length / 2)
+      let highSum = 0
+      let lowSum = 0
+
+      for (let i = 0; i < midPoint; i++) {
+        lowSum += dataArray[i]
+      }
+      for (let i = midPoint; i < dataArray.length; i++) {
+        highSum += dataArray[i]
+      }
+
+      const highEnergy = highSum / (dataArray.length - midPoint) / 255
+      const lowEnergy = lowSum / midPoint / 255
+      const isLikelyVoice = lowEnergy > highEnergy * 1.5 && lowEnergy > 0.1
+
+      if (spike > sensitivity && !isLikelyVoice && timeSinceLastClick > 150) {
+        setClickCount(prev => prev + 1)
+        lastClickTimeRef.current = now
+      }
     }
 
-    // Update smoothed previous
-    previousHighFreqVolumeRef.current = 0.3 * highEnergy + 0.7 * smoothedPrevious
-
+    previousHighFreqVolumeRef.current = 0.3 * energy + 0.7 * smoothedPrevious
     animationFrameRef.current = requestAnimationFrame(processAudioAdvanced)
-  }, [sensitivity])
+  }, [sensitivity, clickSignature, getFrequencyProfile, calculateSimilarity])
 
   // Main audio processing dispatcher
   const processAudio = useCallback(() => {
@@ -353,6 +456,104 @@ function App() {
       audioContextRef.current.close()
     }
     setIsListening(false)
+  }
+
+  // Start calibration
+  const startCalibration = async () => {
+    setError(null)
+    setCalibrationClicks([])
+    calibrationSamplesRef.current = []
+    previousVolumeRef.current = 0
+    lastClickTimeRef.current = 0
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setError('Microphone not available')
+      return
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)()
+      audioContextRef.current = audioContext
+
+      const source = audioContext.createMediaStreamSource(stream)
+      const analyser = audioContext.createAnalyser()
+      analyser.fftSize = 512
+      analyser.smoothingTimeConstant = 0.1
+
+      source.connect(analyser)
+      analyserRef.current = analyser
+
+      setIsCalibrating(true)
+      animationFrameRef.current = requestAnimationFrame(processCalibration)
+    } catch (err) {
+      console.error('Calibration error:', err)
+      setError('Failed to start calibration')
+    }
+  }
+
+  // Finish calibration and save signature
+  const finishCalibration = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop())
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+    }
+
+    const samples = calibrationSamplesRef.current
+    if (samples.length >= 3) {
+      // Average the frequency profiles
+      const avgProfile = samples[0].profile.map((_, i) => {
+        const sum = samples.reduce((acc, s) => acc + s.profile[i], 0)
+        return sum / samples.length
+      })
+
+      const avgEnergy = samples.reduce((acc, s) => acc + s.energy, 0) / samples.length
+
+      const signature = {
+        profile: avgProfile,
+        avgEnergy,
+        sampleCount: samples.length,
+        createdAt: new Date().toISOString()
+      }
+
+      setClickSignature(signature)
+      localStorage.setItem(SIGNATURE_KEY, JSON.stringify(signature))
+    }
+
+    setIsCalibrating(false)
+    setCalibrationClicks([])
+    calibrationSamplesRef.current = []
+  }
+
+  // Cancel calibration
+  const cancelCalibration = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop())
+    }
+    if (audioContextRef.current) {
+      audioContextRef.current.close()
+    }
+    setIsCalibrating(false)
+    setCalibrationClicks([])
+    calibrationSamplesRef.current = []
+  }
+
+  // Clear saved signature
+  const clearSignature = () => {
+    if (window.confirm('Clear your saved pen click signature?')) {
+      setClickSignature(null)
+      localStorage.removeItem(SIGNATURE_KEY)
+    }
   }
 
   // Save dose to history
@@ -508,6 +709,58 @@ function App() {
           </p>
         </div>
 
+        {/* Calibration Modal */}
+        {isCalibrating && (
+          <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
+            <div className="bg-slate-800 rounded-xl p-6 max-w-sm w-full space-y-4">
+              <h2 className="text-xl font-bold text-cyan-400 text-center">Calibrate Your Pen</h2>
+              <p className="text-slate-300 text-sm text-center">
+                Click your pen 5 times. Hold the pen close to your device's microphone.
+              </p>
+
+              {/* Click indicators */}
+              <div className="flex justify-center gap-2">
+                {[0, 1, 2, 3, 4].map(i => (
+                  <div
+                    key={i}
+                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold transition-all ${
+                      i < calibrationClicks.length
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-slate-700 text-slate-500'
+                    }`}
+                  >
+                    {i < calibrationClicks.length ? '\u2713' : i + 1}
+                  </div>
+                ))}
+              </div>
+
+              <p className="text-slate-400 text-center text-lg">
+                {calibrationClicks.length} / 5 clicks recorded
+              </p>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={cancelCalibration}
+                  className="flex-1 bg-slate-700 hover:bg-slate-600 text-white py-3 rounded-lg"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={finishCalibration}
+                  disabled={calibrationClicks.length < 3}
+                  className={`flex-1 py-3 rounded-lg font-medium ${
+                    calibrationClicks.length >= 3
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      : 'bg-slate-700 text-slate-500 cursor-not-allowed'
+                  }`}
+                >
+                  Save ({calibrationClicks.length >= 3 ? 'Ready' : 'Need 3+'})
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Detection Mode Selection */}
         <div className="bg-slate-800 rounded-xl p-4">
           <label className="text-slate-400 text-sm block mb-2">Detection Mode</label>
@@ -530,6 +783,45 @@ function App() {
           <p className="text-slate-500 text-xs mt-2">
             {DETECTION_MODES[detectionMode].description}
           </p>
+
+          {/* Calibration controls for Advanced mode */}
+          {detectionMode === 'advanced' && !isListening && (
+            <div className="mt-3 pt-3 border-t border-slate-700">
+              {clickSignature ? (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-emerald-400 text-sm flex items-center gap-1">
+                      <span>\u2713</span> Signature saved ({clickSignature.sampleCount} samples)
+                    </span>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={startCalibration}
+                      className="flex-1 bg-slate-700 hover:bg-slate-600 text-slate-300 text-sm py-2 rounded-lg"
+                    >
+                      Recalibrate
+                    </button>
+                    <button
+                      onClick={clearSignature}
+                      className="bg-red-900/50 hover:bg-red-900 text-red-300 text-sm py-2 px-3 rounded-lg"
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-amber-400 text-sm">No signature yet - calibrate for best accuracy</p>
+                  <button
+                    onClick={startCalibration}
+                    className="w-full bg-amber-600 hover:bg-amber-500 text-white font-medium py-2 rounded-lg"
+                  >
+                    Calibrate Pen Click
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Sensitivity Slider */}
