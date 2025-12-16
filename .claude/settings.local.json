@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install)",
+      "Bash(echo:*)",
+      "Bash(source ~/.nvm/nvm.sh)",
+      "Bash(source ~/.zshrc)",
+      "Bash(nvm list:*)",
+      "Bash(nvm install:*)",
+      "Bash(nvm use:*)",
+      "Bash(npm run dev:*)",
+      "Bash(openssl req:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
