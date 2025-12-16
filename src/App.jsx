@@ -106,26 +106,39 @@ function App() {
   const requestMicPermission = async () => {
     setError(null)
 
+    // Debug info
+    console.log('Secure context:', window.isSecureContext)
+    console.log('mediaDevices available:', !!navigator.mediaDevices)
+    console.log('getUserMedia available:', !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia))
+
     // Check for secure context first
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setMicPermission('denied')
       if (!isSecureContext) {
         setError('Microphone requires HTTPS. On mobile, use localhost or enable HTTPS. On iOS Safari, this may not work over local network without HTTPS.')
       } else {
-        setError('Microphone not supported in this browser.')
+        setError('Microphone not supported in this browser. Check console for details.')
       }
       return
     }
 
     try {
+      console.log('Requesting microphone access...')
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      console.log('Microphone access granted!')
       // Stop the stream immediately - we just wanted to trigger the permission prompt
       stream.getTracks().forEach(track => track.stop())
       setMicPermission('granted')
     } catch (err) {
-      console.error('Microphone permission error:', err)
+      console.error('Microphone permission error:', err.name, err.message)
       setMicPermission('denied')
-      setError('Microphone access denied. Please allow microphone access in your browser settings.')
+      if (err.name === 'NotAllowedError') {
+        setError('Microphone access denied. Please click the camera icon in Chrome\'s address bar to allow access.')
+      } else if (err.name === 'NotFoundError') {
+        setError('No microphone found. Please connect a microphone and try again.')
+      } else {
+        setError(`Microphone error: ${err.name} - ${err.message}`)
+      }
     }
   }
 
